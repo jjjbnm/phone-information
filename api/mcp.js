@@ -13,6 +13,12 @@ const tools = [
   { name: "get-location-time", description: "Combine coordinates, local time, and timezone explicitly supplied by a consent-based device client. Does not infer the caller's location.", inputSchema: { type:"object", properties:{ latitude:{type:"number"}, longitude:{type:"number"}, timeZone:{type:"string"}, deviceTime:{type:"string"}, permissionGranted:{type:"boolean"} }, required:["permissionGranted"], additionalProperties:false } },
   { name: "get-phone-gmail", description: "Report an email address supplied by the user or an authorized Google OAuth integration. Does not automatically discover accounts or read Gmail messages.", inputSchema: { type:"object", properties:{ email:{type:"string"}, source:{type:"string",enum:["user-provided","google-oauth"]}, consentGranted:{type:"boolean"} }, required:["consentGranted"], additionalProperties:false } },
   { name: "get-phone-number", description: "Report a phone number explicitly supplied by the user or an authorized integration with consent. Web browsers generally cannot read the SIM number.", inputSchema: { type:"object", properties:{ phoneNumber:{type:"string"}, consentGranted:{type:"boolean"} }, required:["consentGranted"], additionalProperties:false } }
+  { name: "get_device_info", description: "Format device details supplied by the Phone Information client; this server cannot inspect hardware directly.", inputSchema: { type:"object", properties:{ manufacturer:{type:"string"}, model:{type:"string"}, androidVersion:{type:"string"}, appVersion:{type:"string"}, screenResolution:{type:"string"}, language:{type:"string"}, timeZone:{type:"string"} }, additionalProperties:false } },
+  { name: "get_battery_status", description: "Report battery values supplied by the device client; no direct server-side battery access.", inputSchema: { type:"object", properties:{ levelPercent:{type:"number"}, charging:{type:"boolean"}, chargingType:{type:"string"}, batteryHealth:{type:"string"}, temperatureC:{type:"number"}, estimatedTimeRemaining:{type:"string"} }, additionalProperties:false } },
+  { name: "get_storage_info", description: "Report storage and RAM figures supplied by the device client. Values are not independently verified.", inputSchema: { type:"object", properties:{ internalTotalBytes:{type:"number"}, internalFreeBytes:{type:"number"}, externalTotalBytes:{type:"number"}, externalFreeBytes:{type:"number"}, ramTotalBytes:{type:"number"}, ramAvailableBytes:{type:"number"} }, additionalProperties:false } },
+  { name: "get_network_type", description: "Report network type and signal details supplied by the device client. Does not scan networks or collect data itself.", inputSchema: { type:"object", properties:{ connectionType:{type:"string"}, cellularGeneration:{type:"string"}, carrier:{type:"string"}, signalStrengthPercent:{type:"number"}, wifiSsid:{type:"string"} }, additionalProperties:false } },
+  { name: "get_connection_status", description: "Report internet and connection status supplied by the device client. Does not test connectivity unless the client supplies the result.", inputSchema: { type:"object", properties:{ online:{type:"boolean"}, internetReachable:{type:"boolean"}, wifiConnected:{type:"boolean"}, cellularConnected:{type:"boolean"}, vpnActive:{type:"boolean"}, checkedAt:{type:"string"} }, additionalProperties:false } }
+
 ];
 function handleTool(name, a) {
   if (name === "format_phone_information_report") {
@@ -52,6 +58,32 @@ function handleTool(name, a) {
     const d={phoneNumber:a.phoneNumber.trim().slice(0,40)};
     return textResult("Phone number supplied with user consent: "+JSON.stringify(d)+". It was not read from the SIM by this server.",d);
   }
+
+  if (name === "get_device_info") {
+    const fields={manufacturer:"Manufacturer",model:"Model",androidVersion:"Android version",appVersion:"App version",screenResolution:"Screen resolution",language:"Language",timeZone:"Timezone"};
+    const d={}; for(const [k,label] of Object.entries(fields)) if(typeof a[k]==="string"&&a[k].trim())d[k]=a[k].trim().slice(0,200);
+    return textResult(Object.keys(d).length ? "Device info supplied by client (not independently verified):\n"+Object.entries(d).map(([k,v])=>fields[k]+": "+v).join("\n") : "No device details supplied. A device client must provide these values.",d);
+  }
+  if (name === "get_battery_status") {
+    const d={}; if(Number.isFinite(a.levelPercent))d.levelPercent=Math.max(0,Math.min(100,a.levelPercent)); if(typeof a.charging==="boolean")d.charging=a.charging;
+    for(const k of ["chargingType","batteryHealth","estimatedTimeRemaining"])if(typeof a[k]==="string"&&a[k].trim())d[k]=a[k].trim().slice(0,200);
+    if(Number.isFinite(a.temperatureC))d.temperatureC=a.temperatureC;
+    return textResult(Object.keys(d).length ? "Battery data supplied by client (not independently verified): "+JSON.stringify(d) : "Battery status unavailable: no values supplied.",d);
+  }
+  if (name === "get_storage_info") {
+    const d={}; for(const k of ["internalTotalBytes","internalFreeBytes","externalTotalBytes","externalFreeBytes","ramTotalBytes","ramAvailableBytes"])if(Number.isFinite(a[k])&&a[k]>=0)d[k]=a[k];
+    return textResult(Object.keys(d).length ? "Storage/RAM data supplied by client in bytes (not independently verified): "+JSON.stringify(d) : "Storage/RAM data unavailable: no values supplied.",d);
+  }
+  if (name === "get_network_type") {
+    const d={}; for(const k of ["connectionType","cellularGeneration","carrier","wifiSsid"])if(typeof a[k]==="string"&&a[k].trim())d[k]=a[k].trim().slice(0,200);
+    if(Number.isFinite(a.signalStrengthPercent))d.signalStrengthPercent=Math.max(0,Math.min(100,a.signalStrengthPercent));
+    return textResult(Object.keys(d).length ? "Network data supplied by client (not independently verified): "+JSON.stringify(d) : "Network details unavailable: no values supplied.",d);
+  }
+  if (name === "get_connection_status") {
+    const d={}; for(const k of ["online","internetReachable","wifiConnected","cellularConnected","vpnActive"])if(typeof a[k]==="boolean")d[k]=a[k];
+    if(typeof a.checkedAt==="string"&&a.checkedAt.trim())d.checkedAt=a.checkedAt.trim().slice(0,100);
+    return textResult(Object.keys(d).length ? "Connection status supplied by client (not independently verified): "+JSON.stringify(d) : "Connection status unavailable: no values supplied.",d);
+  }
   return null;
 }
 function handleRpc(body) {
@@ -59,7 +91,7 @@ function handleRpc(body) {
   const {id,method,params}=body;
   if(body.jsonrpc!=="2.0"||typeof method!=="string")return {status:400,body:jsonRpcError(id,-32600,"Invalid JSON-RPC request")};
   if(method==="notifications/initialized"||method==="notifications/cancelled")return {status:202,body:null};
-  if(method==="initialize")return {status:200,body:{jsonrpc:"2.0",id,result:{protocolVersion:PROTOCOL_VERSION,capabilities:{tools:{}},serverInfo:{name:"phone-information-mcp",version:"1.1.0"},instructions:"Tools report only values explicitly supplied by the caller or a consent-based client. The server cannot independently access Android GPS, the phone clock, SIM phone number, or Google account."}}};
+  if(method==="initialize")return {status:200,body:{jsonrpc:"2.0",id,result:{protocolVersion:PROTOCOL_VERSION,capabilities:{tools:{}},serverInfo:{name:"phone-information-mcp",version:"1.2.0"},instructions:"Tools report only values explicitly supplied by the caller or a consent-based client. The server cannot independently access Android GPS, the phone clock, SIM phone number, or Google account."}}};
   if(method==="ping")return {status:200,body:{jsonrpc:"2.0",id,result:{}}};
   if(method==="tools/list")return {status:200,body:{jsonrpc:"2.0",id,result:{tools}}};
   if(method==="tools/call"){
