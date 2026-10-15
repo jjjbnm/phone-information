@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#0b1220"><title>Share Phone Data — Phone Information</title>
+<style>
+:root{color-scheme:dark;font-family:system-ui,-apple-system,Segoe UI,sans-serif;background:#080d18;color:#f4f6ff}
+*{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 80% 0%,#28336555,transparent 40%),#080d18}
+main{max-width:760px;margin:auto;padding:24px 16px 48px}.brand{color:#b9c6ff;font-weight:800;margin:10px 0 30px}
+h1{font-size:clamp(32px,8vw,52px);line-height:1.05;margin:12px 0}p{color:#aab5ca;line-height:1.6}
+.card{background:#111b2c;border:1px solid #253148;border-radius:18px;padding:18px;margin:18px 0}
+button{border:0;border-radius:12px;padding:14px 17px;font-size:15px;font-weight:750;cursor:pointer;margin:6px 6px 6px 0}
+.primary{background:#b9c6ff;color:#0b1220}.secondary{background:#ffffff0d;color:#e7ebfa;border:1px solid #253148}
+.status{min-height:24px;color:#b9c6ff;font-size:14px}
+pre,textarea{width:100%;white-space:pre-wrap;overflow-wrap:anywhere;background:#080d18;color:#dce5ff;border:1px solid #253148;border-radius:12px;padding:12px;font:13px ui-monospace,monospace}
+small{color:#9ba8bf}a{color:#b9c6ff}
+</style></head>
+<body><main>
+<div class="brand">◈ Phone Information</div>
+<p>DEVICE SETUP · CONSENT FIRST</p>
+<h1>Share your phone's<br><span style="color:#9aabff">time & location.</span></h1>
+<p>Tap the button to read the clock and timezone in this browser and, if you allow it, request your current location. Nothing is sent to this website's server; the results stay on this page until you choose to copy them.</p>
+<section class="card">
+<h2>1. Read device time</h2><p id="time">Not read yet</p>
+<h2>2. Request location</h2><p>Android/Chrome may show a permission prompt. Choose Allow only if you want to share coordinates.</p>
+<button class="primary" id="get">Read time and request location</button>
+<div class="status" id="status" role="status" aria-live="polite">Waiting for your choice.</div>
+</section>
+<section class="card">
+<h2>3. Copy data for ChatGPT</h2>
+<p>Review the values before copying. Coordinates are precise location data, so share them only if you're comfortable.</p>
+<textarea id="output" rows="8" readonly placeholder="Your values will appear here after you tap the button."></textarea>
+<button class="primary" id="copy" disabled>Copy data</button>
+<button class="secondary" id="clear">Clear data</button>
+<p><small>This page does not automatically send data to ChatGPT or store it on the server. Paste the copied JSON into your ChatGPT conversation and ask it to use the Phone Information MCP tools. If you deny location permission, time and timezone can still be shared without coordinates.</small></p>
+</section>
+<p><a href="/">← Back to Phone Information</a></p>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+function currentTime(){const now=new Date();return {deviceTime:now.toISOString(),timeZone:Intl.DateTimeFormat().resolvedOptions().timeZone||null,localTime:now.toLocaleString()}}
+function show(data){$('output').value=JSON.stringify(data,null,2);$('copy').disabled=false;$('time').textContent=data.localTime+' · '+(data.timeZone||'Timezone unavailable')}
+$('get').addEventListener('click',()=>{
+ const t=currentTime();const base={deviceTime:t.deviceTime,timeZone:t.timeZone,permissionGranted:false};
+ if(!navigator.geolocation){show({...base,localTime:t.localTime,locationStatus:'Geolocation is not supported by this browser.'});$('status').textContent='This browser does not support location.';return}
+ $('status').textContent='Requesting location permission…';
+ navigator.geolocation.getCurrentPosition(pos=>{
+  const data={...base,permissionGranted:true,latitude:pos.coords.latitude,longitude:pos.coords.longitude,accuracyMeters:pos.coords.accuracy,localTime:t.localTime,locationStatus:'Location permission granted'};
+  show(data);$('status').textContent='Location and time read. Review the data before copying.';
+ },err=>{
+  show({...base,localTime:t.localTime,locationStatus:err.code===1?'Location permission denied.':err.code===2?'Location unavailable.':'Location request timed out.'});
+  $('status').textContent='Time was read, but location was not provided. You can still copy the time and timezone.';
+ },{enableHighAccuracy:true,timeout:15000,maximumAge:0});
+});
+$('copy').addEventListener('click',async()=>{
+ try{await navigator.clipboard.writeText($('output').value);$('status').textContent='Copied. Paste it into your ChatGPT conversation.'}
+ catch{ $('output').focus();$('output').select();$('status').textContent='Select the text and use Copy from the browser menu.'}
+});
+$('clear').addEventListener('click',()=>{$('output').value='';$('copy').disabled=true;$('time').textContent='Not read yet';$('status').textContent='Cleared. No data was sent or stored.'});
+</script></body></html>
