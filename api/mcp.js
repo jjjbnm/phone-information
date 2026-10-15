@@ -1,116 +1,82 @@
-// Stateless MCP endpoint for Vercel serverless functions.
-// This endpoint formats device details explicitly supplied by the caller.
-// It cannot inspect a visitor's phone automatically.
 const PROTOCOL_VERSION = "2025-03-26";
 
 function jsonRpcError(id, code, message) {
   return { jsonrpc: "2.0", id: id ?? null, error: { code, message } };
 }
-
-function textResult(text) {
-  return {
-    content: [{ type: "text", text }],
-    structuredContent: { report: text },
-    isError: false
-  };
+function textResult(text, data = {}) {
+  return { content: [{ type: "text", text }], structuredContent: { report: text, ...data }, isError: false };
 }
-
 const tools = [
-  {
-    name: "format_phone_information_report",
-    description: "Format device information that the caller explicitly provides. This tool cannot detect or access the caller's phone by itself. Do not include passwords, IMEI, serial numbers, or other sensitive identifiers.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        platform: { type: "string", description: "Platform reported by the device browser, for example Android" },
-        browser: { type: "string", description: "Browser name, if known" },
-        screen: { type: "string", description: "Screen dimensions and pixel ratio, if known" },
-        language: { type: "string", description: "Browser language, if known" },
-        online: { type: "string", description: "Online status reported by the browser" },
-        battery: { type: "string", description: "Battery level/status only if the browser exposed it" },
-        memory: { type: "string", description: "Approximate browser-reported memory, if available" },
-        storage: { type: "string", description: "Origin storage estimate, if available" },
-        network: { type: "string", description: "Browser-reported network type, if available" },
-        userAgent: { type: "string", description: "Optional browser user-agent string; omit if not needed" }
-      },
-      additionalProperties: false
-    }
-  }
+  { name: "format_phone_information_report", description: "Format device details explicitly supplied by the caller; cannot inspect the phone itself. Never include passwords, IMEI, or serial numbers.", inputSchema: { type: "object", properties: { platform: {type:"string"}, browser:{type:"string"}, screen:{type:"string"}, language:{type:"string"}, online:{type:"string"}, battery:{type:"string"}, memory:{type:"string"}, storage:{type:"string"}, network:{type:"string"}, userAgent:{type:"string"} }, additionalProperties:false } },
+  { name: "get-phone-location", description: "Report coordinates supplied by a consent-based browser/app client after the user grants location permission. This remote server cannot access GPS by itself.", inputSchema: { type:"object", properties:{ latitude:{type:"number"}, longitude:{type:"number"}, accuracyMeters:{type:"number"}, permissionGranted:{type:"boolean"} }, required:["permissionGranted"], additionalProperties:false } },
+  { name: "get-phone-time", description: "Report phone-local time and timezone supplied by the device client. The remote server cannot read the phone clock directly.", inputSchema: { type:"object", properties:{ deviceTime:{type:"string",description:"Phone-local ISO 8601 date/time supplied by the client"}, timeZone:{type:"string",description:"IANA timezone, e.g. Asia/Jerusalem"} }, additionalProperties:false } },
+  { name: "get-location-time", description: "Combine coordinates, local time, and timezone explicitly supplied by a consent-based device client. Does not infer the caller's location.", inputSchema: { type:"object", properties:{ latitude:{type:"number"}, longitude:{type:"number"}, timeZone:{type:"string"}, deviceTime:{type:"string"}, permissionGranted:{type:"boolean"} }, required:["permissionGranted"], additionalProperties:false } },
+  { name: "get-phone-gmail", description: "Report an email address supplied by the user or an authorized Google OAuth integration. Does not automatically discover accounts or read Gmail messages.", inputSchema: { type:"object", properties:{ email:{type:"string"}, source:{type:"string",enum:["user-provided","google-oauth"]}, consentGranted:{type:"boolean"} }, required:["consentGranted"], additionalProperties:false } },
+  { name: "get-phone-number", description: "Report a phone number explicitly supplied by the user or an authorized integration with consent. Web browsers generally cannot read the SIM number.", inputSchema: { type:"object", properties:{ phoneNumber:{type:"string"}, consentGranted:{type:"boolean"} }, required:["consentGranted"], additionalProperties:false } }
 ];
-
-function handleRpc(body) {
-  if (!body || typeof body !== "object" || Array.isArray(body)) {
-    return { status: 400, body: jsonRpcError(null, -32600, "Invalid JSON-RPC request") };
+function handleTool(name, a) {
+  if (name === "format_phone_information_report") {
+    const keys=["platform","browser","screen","language","online","battery","memory","storage","network","userAgent"];
+    const lines=keys.filter(k=>typeof a[k]==="string"&&a[k].trim()).map(k=>k+": "+a[k].trim().slice(0,500));
+    return textResult(lines.length ? "Phone Information report (provided by caller; not independently verified):\n"+lines.join("\n")+"\n\nThis tool did not access the device directly." : "No device details were supplied. Open Phone Information on the device and provide the visible details.");
   }
-  const { id, method, params } = body;
-  if (body.jsonrpc !== "2.0" || typeof method !== "string") {
-    return { status: 400, body: jsonRpcError(id, -32600, "Invalid JSON-RPC request") };
+  if (name === "get-phone-location") {
+    if(a.permissionGranted!==true) return textResult("Location not returned. Explicit location permission is required.");
+    if(!Number.isFinite(a.latitude)||!Number.isFinite(a.longitude)) return textResult("Location unavailable: no coordinates were supplied by the consent-based browser/app client. This server cannot read GPS by itself.");
+    if(a.latitude < -90 || a.latitude > 90 || a.longitude < -180 || a.longitude > 180) return textResult("Invalid coordinates.");
+    const d={latitude:a.latitude,longitude:a.longitude}; if(Number.isFinite(a.accuracyMeters)&&a.accuracyMeters>=0)d.accuracyMeters=a.accuracyMeters;
+    return textResult("Location supplied by the consent-based client (not independently verified): "+JSON.stringify(d)+". Coordinates are sensitive; share only when needed.",d);
   }
-
-  if (method === "notifications/initialized" || method === "notifications/cancelled") {
-    return { status: 202, body: null };
+  if (name === "get-phone-time") {
+    if(typeof a.deviceTime!=="string"||!a.deviceTime.trim()) return textResult("Phone-local time unavailable: the device client did not supply it. This server cannot read the phone clock directly.");
+    const d={deviceTime:a.deviceTime.trim().slice(0,100)}; if(typeof a.timeZone==="string"&&a.timeZone.trim())d.timeZone=a.timeZone.trim().slice(0,100);
+    return textResult("Phone time supplied by the client (not independently verified): "+JSON.stringify(d),d);
   }
-
-  if (method === "initialize") {
-    return {
-      status: 200,
-      body: {
-        jsonrpc: "2.0",
-        id,
-        result: {
-          protocolVersion: PROTOCOL_VERSION,
-          capabilities: { tools: {} },
-          serverInfo: { name: "phone-information-mcp", version: "1.0.0" },
-          instructions: "This server only formats device details explicitly provided by the caller. It does not automatically access a phone or the Phone Information website."
-        }
-      }
-    };
+  if (name === "get-location-time") {
+    if(a.permissionGranted!==true)return textResult("Location-time not returned. Explicit location permission is required.");
+    if(!Number.isFinite(a.latitude)||!Number.isFinite(a.longitude))return textResult("Location-time unavailable: no coordinates were supplied after permission.");
+    if(a.latitude < -90 || a.latitude > 90 || a.longitude < -180 || a.longitude > 180)return textResult("Invalid coordinates.");
+    const d={latitude:a.latitude,longitude:a.longitude}; if(typeof a.timeZone==="string"&&a.timeZone.trim())d.timeZone=a.timeZone.trim().slice(0,100); if(typeof a.deviceTime==="string"&&a.deviceTime.trim())d.deviceTime=a.deviceTime.trim().slice(0,100);
+    const missing=[];if(!d.timeZone)missing.push("timezone");if(!d.deviceTime)missing.push("phone-local time");
+    return textResult("Location/time supplied by the client (not independently verified): "+JSON.stringify(d)+(missing.length?". Missing: "+missing.join(", "):""),d);
   }
-
-  if (method === "ping") {
-    return { status: 200, body: { jsonrpc: "2.0", id, result: {} } };
+  if (name === "get-phone-gmail") {
+    if(a.consentGranted!==true)return textResult("Email not returned. Explicit user consent is required.");
+    if(typeof a.email!=="string"||!a.email.trim())return textResult("No email supplied. Configure Google OAuth with appropriate consent, or have the user provide the address. This tool cannot discover the account automatically.");
+    const d={email:a.email.trim().slice(0,254),source:a.source==="google-oauth"?"google-oauth":"user-provided"};
+    return textResult("Email supplied with user consent: "+JSON.stringify(d)+". Gmail messages were not accessed.",d);
   }
-
-  if (method === "tools/list") {
-    return { status: 200, body: { jsonrpc: "2.0", id, result: { tools } } };
+  if (name === "get-phone-number") {
+    if(a.consentGranted!==true)return textResult("Phone number not returned. Explicit user consent is required.");
+    if(typeof a.phoneNumber!=="string"||!a.phoneNumber.trim())return textResult("No number supplied. A website generally cannot read the SIM phone number; the user must enter it or an authorized native integration must provide it.");
+    const d={phoneNumber:a.phoneNumber.trim().slice(0,40)};
+    return textResult("Phone number supplied with user consent: "+JSON.stringify(d)+". It was not read from the SIM by this server.",d);
   }
-
-  if (method === "tools/call") {
-    const name = params && params.name;
-    const args = (params && params.arguments) || {};
-    if (name !== "format_phone_information_report") {
-      return { status: 200, body: { jsonrpc: "2.0", id, result: { ...textResult("Unknown tool."), isError: true } } };
-    }
-    const allowed = ["platform", "browser", "screen", "language", "online", "battery", "memory", "storage", "network", "userAgent"];
-    const lines = allowed
-      .filter((key) => typeof args[key] === "string" && args[key].trim())
-      .map((key) => key + ": " + args[key].trim().slice(0, 500));
-    const report = lines.length
-      ? "Phone Information report (provided by caller; not independently verified):\n" + lines.join("\n") + "\n\nPrivacy note: browser-based information can be incomplete. This tool did not access the device directly."
-      : "No device details were supplied. Open Phone Information on the device and provide the visible details to the caller first.";
-    return { status: 200, body: { jsonrpc: "2.0", id, result: textResult(report) } };
-  }
-
-  if (id === undefined) {
-    return { status: 202, body: null };
-  }
-  return { status: 200, body: jsonRpcError(id, -32601, "Method not found") };
+  return null;
 }
-
-module.exports = function handler(req, res) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Accept, MCP-Protocol-Version, Mcp-Session-Id");
-  res.setHeader("Cache-Control", "no-store");
-
-  if (req.method === "OPTIONS") return res.status(204).end();
-  if (req.method !== "POST") {
-    res.setHeader("Allow", "POST, OPTIONS");
-    return res.status(405).json({ error: "Use POST with a JSON-RPC MCP request." });
+function handleRpc(body) {
+  if(!body||typeof body!=="object"||Array.isArray(body))return {status:400,body:jsonRpcError(null,-32600,"Invalid JSON-RPC request")};
+  const {id,method,params}=body;
+  if(body.jsonrpc!=="2.0"||typeof method!=="string")return {status:400,body:jsonRpcError(id,-32600,"Invalid JSON-RPC request")};
+  if(method==="notifications/initialized"||method==="notifications/cancelled")return {status:202,body:null};
+  if(method==="initialize")return {status:200,body:{jsonrpc:"2.0",id,result:{protocolVersion:PROTOCOL_VERSION,capabilities:{tools:{}},serverInfo:{name:"phone-information-mcp",version:"1.1.0"},instructions:"Tools report only values explicitly supplied by the caller or a consent-based client. The server cannot independently access Android GPS, the phone clock, SIM phone number, or Google account."}}};
+  if(method==="ping")return {status:200,body:{jsonrpc:"2.0",id,result:{}}};
+  if(method==="tools/list")return {status:200,body:{jsonrpc:"2.0",id,result:{tools}}};
+  if(method==="tools/call"){
+    const result=handleTool(params&&params.name,(params&&params.arguments)||{});
+    return {status:200,body:{jsonrpc:"2.0",id,result:result||{...textResult("Unknown tool."),isError:true}}};
   }
-
-  const body = req.body;
-  const result = handleRpc(body);
-  if (result.body === null) return res.status(result.status).end();
+  if(id===undefined)return {status:202,body:null};
+  return {status:200,body:jsonRpcError(id,-32601,"Method not found")};
+}
+module.exports=function handler(req,res){
+  res.setHeader("Access-Control-Allow-Origin","*");
+  res.setHeader("Access-Control-Allow-Methods","POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers","Content-Type, Accept, MCP-Protocol-Version, Mcp-Session-Id");
+  res.setHeader("Cache-Control","no-store");
+  if(req.method==="OPTIONS")return res.status(204).end();
+  if(req.method!=="POST"){res.setHeader("Allow","POST, OPTIONS");return res.status(405).json({error:"Use POST with a JSON-RPC MCP request."});}
+  const result=handleRpc(req.body);
+  if(result.body===null)return res.status(result.status).end();
   return res.status(result.status).json(result.body);
 };
